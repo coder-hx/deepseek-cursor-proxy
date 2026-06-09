@@ -102,6 +102,20 @@ class TunnelTests(unittest.TestCase):
         self.assertIn("ERR_NGROK_108", message)
         self.assertIn("only one session at a time", message)
 
+    def test_exit_error_message_flags_reserved_endpoint_conflict(self) -> None:
+        tunnel = NgrokTunnel(
+            "http://127.0.0.1:9000", ngrok_url="https://example.ngrok-free.dev"
+        )
+        tunnel._output_lines.append(
+            "ERROR: failed to start tunnel: The endpoint "
+            "'https://example.ngrok-free.dev' is already online."
+        )
+        tunnel._output_lines.append("ERROR: ERR_NGROK_334")
+        message = tunnel._exit_error_message()
+        self.assertIn("ERR_NGROK_334", message)
+        self.assertIn("another", message.lower())
+        self.assertIn("already running", message.lower())
+
     def test_exit_error_message_without_output_is_actionable(self) -> None:
         tunnel = NgrokTunnel("http://127.0.0.1:9000")
         message = tunnel._exit_error_message()

@@ -185,6 +185,15 @@ class NgrokTunnel:
                 "stray ngrok.exe), then retry. The proxy now reuses an existing "
                 "ngrok tunnel automatically when one is already running."
             )
+        elif "err_ngrok_334" in lowered or "already online" in lowered:
+            detail += (
+                "\nhint: this reserved endpoint is already online - another "
+                "copy of the proxy (another window, or an autostart instance) "
+                "is almost certainly already running and serving it. You do not "
+                "need a second one: switch to the window that is already "
+                "running, or close every proxy window and kill stray ngrok.exe "
+                "before starting once."
+            )
         elif "authtoken" in lowered or "err_ngrok_105" in lowered:
             detail += (
                 f"\nhint: run `{self.command} config add-authtoken <token>` once "
