@@ -479,7 +479,15 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
                 self.send_header(name, value)
             self.end_headers()
         except (BrokenPipeError, ConnectionError) as exc:
-            LOG.warning("client disconnected while %s: %s", disconnect_context, exc)
+            # Cursor routinely cancels in-flight streams (Stop, re-edit, a
+            # superseded request, or an ngrok hiccup). On Windows this surfaces
+            # as WinError 10053/10054. It is expected, not an error: the proxy
+            # already caches partial reasoning and keeps serving.
+            LOG.info(
+                "client closed connection (request cancelled) while %s: %s",
+                disconnect_context,
+                exc,
+            )
             return False
         return True
 
@@ -495,7 +503,11 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
             if flush:
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionError) as exc:
-            LOG.warning("client disconnected while %s: %s", disconnect_context, exc)
+            LOG.info(
+                "client closed connection (request cancelled) while %s: %s",
+                disconnect_context,
+                exc,
+            )
             return False
         return True
 
