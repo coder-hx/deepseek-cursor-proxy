@@ -743,16 +743,18 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
                 status=getattr(response, "status", 200),
                 headers={
                     "Content-Type": "text/event-stream",
-                    "Cache-Control": "no-cache",
+                    "Cache-Control": "no-cache, no-transform",
                     "Connection": "close",
+                    "X-Accel-Buffering": "no",
                 },
             )
         sent_headers = self._send_response_headers(
             getattr(response, "status", 200),
             [
                 ("Content-Type", "text/event-stream"),
-                ("Cache-Control", "no-cache"),
+                ("Cache-Control", "no-cache, no-transform"),
                 ("Connection", "close"),
+                ("X-Accel-Buffering", "no"),
             ],
             "sending streaming response headers",
         )

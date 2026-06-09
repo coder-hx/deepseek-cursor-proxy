@@ -610,9 +610,17 @@ class HttpBoundaryTests(unittest.TestCase):
         )
         started = time.monotonic()
         with urlopen(request, timeout=1) as response:
+            content_type = response.headers.get("Content-Type")
+            cache_control = response.headers.get("Cache-Control")
+            connection = response.headers.get("Connection")
+            accel_buffering = response.headers.get("X-Accel-Buffering")
             body = response.read().decode("utf-8")
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertIn("data: [DONE]", body)
+        self.assertEqual(content_type, "text/event-stream")
+        self.assertEqual(cache_control, "no-cache, no-transform")
+        self.assertEqual(connection, "close")
+        self.assertEqual(accel_buffering, "no")
 
     def test_normal_logging_summarizes_without_bodies_or_keys(self) -> None:
         with self.assertLogs("deepseek_cursor_proxy", level="INFO") as captured:
