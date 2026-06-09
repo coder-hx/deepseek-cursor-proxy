@@ -78,6 +78,28 @@ class _FailingStreamingResponse:
         raise OSError("record layer failure")
 
 
+class _SilentThenDataStreamingResponse:
+    """Times out a few reads (silent upstream) before serving each line, to
+    exercise the SSE keep-alive path."""
+
+    status = 200
+    headers = {"Content-Type": "text/event-stream"}
+
+    def __init__(self, lines: list[bytes], timeouts_before_each: int) -> None:
+        self._lines = lines
+        self._timeouts_before_each = timeouts_before_each
+        self._pending_timeouts = timeouts_before_each
+
+    def readline(self) -> bytes:
+        if self._pending_timeouts > 0:
+            self._pending_timeouts -= 1
+            raise TimeoutError("timed out")
+        if not self._lines:
+            return b""
+        self._pending_timeouts = self._timeouts_before_each
+        return self._lines.pop(0)
+
+
 class _BrokenPipeWfile:
     def write(self, body: bytes) -> None:
         raise BrokenPipeError("test disconnect")
@@ -309,6 +331,56 @@ class HandlerStubTests(unittest.TestCase):
             with self.assertLogs("deepseek_cursor_proxy", level="WARNING") as captured:
                 result = handler._proxy_streaming_response(
                     _FailingStreamingResponse(),
+                    "deepseek-v4-pro",
+                    [{"role": "user", "content": "hi"}],
+                    "ns",
+                )
+        finally:
+            handler.server.reasoning_store.close()
+        self.assertFalse(result.sent)
+        self.assertIn(
+            "upstream streaming response read failed", "\n".join(captured.output)
+        )
+
+    def test_streaming_emits_keepalive_during_upstream_silence(self) -> None:
+        wfile = BytesIO()
+        handler = _make_handler_stub(
+            wfile, display_reasoning=False, stream_heartbeat_seconds=5
+        )
+        chunk = {
+            "id": "stream",
+            "model": "deepseek-v4-pro",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}}],
+        }
+        response = _SilentThenDataStreamingResponse(
+            [
+                f"data: {json.dumps(chunk)}\n\n".encode("utf-8"),
+                b"data: [DONE]\n\n",
+            ],
+            timeouts_before_each=2,
+        )
+        try:
+            result = handler._proxy_streaming_response(
+                response,
+                "deepseek-v4-pro",
+                [{"role": "user", "content": "hi"}],
+                "ns",
+            )
+        finally:
+            handler.server.reasoning_store.close()
+        body = wfile.getvalue().decode("utf-8")
+        self.assertTrue(result.sent)
+        self.assertIn(": keep-alive", body)
+        self.assertIn("data: [DONE]", body)
+
+    def test_streaming_read_timeout_without_heartbeat_is_failure(self) -> None:
+        wfile = BytesIO()
+        handler = _make_handler_stub(wfile, stream_heartbeat_seconds=0)
+        response = _SilentThenDataStreamingResponse([], timeouts_before_each=1)
+        try:
+            with self.assertLogs("deepseek_cursor_proxy", level="WARNING") as captured:
+                result = handler._proxy_streaming_response(
+                    response,
                     "deepseek-v4-pro",
                     [{"role": "user", "content": "hi"}],
                     "ns",

@@ -26,6 +26,7 @@ DEFAULT_COLLAPSIBLE_REASONING = True
 DEFAULT_NGROK = True
 DEFAULT_VERBOSE = False
 DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_STREAM_HEARTBEAT_SECONDS = 15.0
 DEFAULT_MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024
 DEFAULT_CORS = False
 DEFAULT_MISSING_REASONING_STRATEGY = "recover"
@@ -52,6 +53,10 @@ port: {DEFAULT_PORT}
 ngrok: {str(DEFAULT_NGROK).lower()}
 verbose: {str(DEFAULT_VERBOSE).lower()}
 request_timeout: {DEFAULT_REQUEST_TIMEOUT:g}
+# Send an SSE keep-alive to Cursor when the upstream is silent this long
+# (seconds) so long DeepSeek "thinking" prefill does not trip idle timeouts.
+# Set to 0 to disable.
+stream_heartbeat_seconds: {DEFAULT_STREAM_HEARTBEAT_SECONDS:g}
 max_request_body_bytes: {DEFAULT_MAX_REQUEST_BODY_BYTES}
 cors: {str(DEFAULT_CORS).lower()}
 
@@ -200,6 +205,7 @@ class ProxyConfig:
     thinking: str = DEFAULT_THINKING
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
+    stream_heartbeat_seconds: float = DEFAULT_STREAM_HEARTBEAT_SECONDS
     max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES
     reasoning_content_path: Path = field(default_factory=default_reasoning_content_path)
     missing_reasoning_strategy: str = DEFAULT_MISSING_REASONING_STRATEGY
@@ -246,6 +252,10 @@ class ProxyConfig:
             request_timeout=as_float(
                 setting_value(settings, "request_timeout"),
                 DEFAULT_REQUEST_TIMEOUT,
+            ),
+            stream_heartbeat_seconds=as_float(
+                setting_value(settings, "stream_heartbeat_seconds"),
+                DEFAULT_STREAM_HEARTBEAT_SECONDS,
             ),
             max_request_body_bytes=as_int(
                 setting_value(settings, "max_request_body_bytes"),

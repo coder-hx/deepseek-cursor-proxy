@@ -47,6 +47,12 @@ class ProxyResponseResult:
     usage: dict[str, Any] | None = None
 
 
+# Standard SSE keep-alive: a comment line, ignored by compliant SSE/OpenAI
+# stream parsers, used to keep an idle connection from being timed out while
+# DeepSeek is still "thinking" and producing no bytes yet.
+SSE_KEEPALIVE = b": keep-alive\n\n"
+
+
 class DeepSeekProxyServer(ThreadingHTTPServer):
     config: ProxyConfig
     reasoning_store: ReasoningStore
@@ -696,6 +702,25 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         sent = self._write_to_client(body, "sending upstream response body")
         return ProxyResponseResult(sent, usage)
 
+    @staticmethod
+    def _response_socket(response: Any) -> Any:
+        """Best-effort access to the upstream socket so we can set a per-read
+        timeout. Returns None for stubs/objects that aren't real sockets."""
+        fp = getattr(response, "fp", None)
+        raw = getattr(fp, "raw", None)
+        return getattr(raw, "_sock", None)
+
+    def _set_stream_read_timeout(self, response: Any, seconds: float) -> None:
+        if not seconds or seconds <= 0:
+            return
+        sock = self._response_socket(response)
+        if sock is None:
+            return
+        try:
+            sock.settimeout(seconds)
+        except OSError:
+            pass
+
     def _proxy_streaming_response(
         self,
         response: Any,
@@ -759,17 +784,42 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         )
         finalized = False
         pending_recovery_notice = recovery_notice
+        # While the upstream is silent, fall back to short reads so we can keep
+        # the connection to Cursor alive with SSE keep-alives instead of
+        # blocking for the full request_timeout. This stops long DeepSeek
+        # "thinking" prefill from tripping ngrok/Cursor idle timeouts.
+        heartbeat = self.config.stream_heartbeat_seconds
+        self._set_stream_read_timeout(response, heartbeat)
+        last_data = time.monotonic()
         try:
             while True:
                 if self._is_shutting_down():
                     return ProxyResponseResult(False, usage)
                 try:
                     line = response.readline()
+                except TimeoutError as exc:
+                    if not heartbeat or heartbeat <= 0:
+                        LOG.warning(
+                            "upstream streaming response read failed: %s", exc
+                        )
+                        return ProxyResponseResult(False, usage)
+                    idle = time.monotonic() - last_data
+                    if idle > max(self.config.request_timeout, heartbeat):
+                        LOG.warning(
+                            "upstream stream idle for %.0fs; closing", idle
+                        )
+                        return ProxyResponseResult(False, usage)
+                    if not self._write_to_client(
+                        SSE_KEEPALIVE, "sending stream keep-alive", flush=True
+                    ):
+                        return ProxyResponseResult(False, usage)
+                    continue
                 except (HTTPException, OSError) as exc:
                     LOG.warning("upstream streaming response read failed: %s", exc)
                     return ProxyResponseResult(False, usage)
                 if not line:
                     break
+                last_data = time.monotonic()
                 (
                     rewritten,
                     finalized,
@@ -1016,6 +1066,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--request-timeout",
         type=float,
         help="Upstream request timeout in seconds, default from config or 300",
+    )
+    parser.add_argument(
+        "--stream-heartbeat-seconds",
+        type=float,
+        help=(
+            "Send an SSE keep-alive to Cursor after this many seconds of "
+            "upstream silence so long thinking does not trip idle timeouts; "
+            "0 disables. Default from config or 15"
+        ),
     )
     parser.add_argument(
         "--max-request-body-bytes",
@@ -1350,6 +1409,8 @@ def main(argv: list[str] | None = None) -> int:
         updates["cors"] = args.cors
     if args.request_timeout is not None:
         updates["request_timeout"] = args.request_timeout
+    if args.stream_heartbeat_seconds is not None:
+        updates["stream_heartbeat_seconds"] = args.stream_heartbeat_seconds
     if args.max_request_body_bytes is not None:
         updates["max_request_body_bytes"] = args.max_request_body_bytes
     if args.reasoning_cache_max_age_seconds is not None:
