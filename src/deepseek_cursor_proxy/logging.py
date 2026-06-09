@@ -51,20 +51,26 @@ class TerminalSpinner:
         text: str,
         stream: Any | None = None,
         interval: float = 0.12,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.stream = stream if stream is not None else sys.stderr
         self.enabled = enabled and bool(getattr(self.stream, "isatty", lambda: False)())
         self.text = text
         self.interval = interval
         self._stop = threading.Event()
+        # External event (e.g. the server's shutdown flag) that also halts the
+        # spinner. This keeps the daemon spinner thread from writing to stderr
+        # while the interpreter is shutting down, which would otherwise abort
+        # with `_enter_buffered_busy: could not acquire lock for <stderr>`.
+        self._external_stop = stop_event
         self._thread: threading.Thread | None = None
         self._visible = False
 
     def start(self) -> "TerminalSpinner":
         if not self.enabled or self._thread is not None:
             return self
-        self.stream.write(self.hide_cursor)
-        self.stream.flush()
+        if not self._write(self.hide_cursor):
+            return self
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -77,20 +83,30 @@ class TerminalSpinner:
             self._thread.join(timeout=1)
             self._thread = None
         if self._visible:
-            self.stream.write("\r" + (" " * self._clear_width()) + "\r")
-            self.stream.flush()
+            self._write("\r" + (" " * self._clear_width()) + "\r")
             self._visible = False
-        self.stream.write(self.show_cursor)
-        self.stream.flush()
+        self._write(self.show_cursor)
 
     def _run(self) -> None:
         index = 0
-        while not self._stop.is_set():
-            self.stream.write("\r" + self.text.format(frame=self.frames[index]))
-            self.stream.flush()
+        while not self._stop.is_set() and not self._external_stopped():
+            if not self._write("\r" + self.text.format(frame=self.frames[index])):
+                return
             self._visible = True
             index = (index + 1) % len(self.frames)
             self._stop.wait(self.interval)
+
+    def _external_stopped(self) -> bool:
+        return self._external_stop is not None and self._external_stop.is_set()
+
+    def _write(self, text: str) -> bool:
+        try:
+            self.stream.write(text)
+            self.stream.flush()
+        except (ValueError, OSError):
+            # Stream closed/closing (e.g. during interpreter shutdown).
+            return False
+        return True
 
     def _clear_width(self) -> int:
         return max(len(self.text.format(frame=frame)) for frame in self.frames)

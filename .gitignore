@@ -145,6 +145,7 @@ celerybeat.pid
 .deepseek-cursor-proxy/
 trace-dumps/
 reasoning_content.sqlite3*
+logs/
 .venv
 env/
 venv/

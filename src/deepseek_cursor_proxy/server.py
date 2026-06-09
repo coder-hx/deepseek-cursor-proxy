@@ -8,6 +8,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -51,6 +52,53 @@ class DeepSeekProxyServer(ThreadingHTTPServer):
     reasoning_store: ReasoningStore
     trace_writer: TraceWriter | None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Set once shutdown begins so in-flight handler threads (and their
+        # terminal spinners) stop touching stderr before the interpreter
+        # finalizes. Without this, a daemon thread mid-write holds the stderr
+        # buffer lock at finalization and Python aborts with
+        # `_enter_buffered_busy: could not acquire lock for <stderr>`.
+        self.shutting_down = threading.Event()
+        self._active_threads: set[threading.Thread] = set()
+        self._active_threads_lock = threading.Lock()
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        current = threading.current_thread()
+        with self._active_threads_lock:
+            self._active_threads.add(current)
+        try:
+            super().process_request_thread(request, client_address)  # type: ignore[misc]
+        finally:
+            with self._active_threads_lock:
+                self._active_threads.discard(current)
+
+    def begin_shutdown(self, grace_seconds: float = 3.0) -> None:
+        """Signal in-flight requests to stop and wait briefly for them.
+
+        Joining the worker threads (and letting their spinners notice the
+        shutdown event and stop writing to stderr) before `main` returns is
+        what prevents the daemon-thread interpreter-shutdown crash."""
+        self.shutting_down.set()
+        deadline = time.monotonic() + grace_seconds
+        with self._active_threads_lock:
+            threads = [t for t in self._active_threads if t.is_alive()]
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionError)):
+            # Cursor cancelling a request (e.g. pressing Stop) resets the
+            # socket; that is routine, not an error worth a traceback.
+            if getattr(self, "config", None) is not None and self.config.verbose:
+                LOG.info("client %s disconnected: %s", client_address, exc)
+            return
+        LOG.warning("error processing request from %s: %s", client_address, exc)
+
 
 class DeepSeekProxyHandler(BaseHTTPRequestHandler):
     server_version = "DeepSeekPythonProxy/0.1"
@@ -66,6 +114,10 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
     @property
     def trace_writer(self) -> TraceWriter | None:
         return getattr(self.server, "trace_writer", None)
+
+    def _is_shutting_down(self) -> bool:
+        event = getattr(self.server, "shutting_down", None)
+        return event is not None and event.is_set()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -242,6 +294,7 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         spinner = TerminalSpinner(
             enabled=bool(prepared.payload.get("stream")) and not self.config.verbose,
             text="└ {frame}",
+            stop_event=getattr(self.server, "shutting_down", None),
         ).start()
 
         try:
@@ -696,6 +749,8 @@ class DeepSeekProxyHandler(BaseHTTPRequestHandler):
         pending_recovery_notice = recovery_notice
         try:
             while True:
+                if self._is_shutting_down():
+                    return ProxyResponseResult(False, usage)
                 try:
                     line = response.readline()
                 except (HTTPException, OSError) as exc:
@@ -1371,6 +1426,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.info("shutting down")
     finally:
+        # Stop accepting new work, then give in-flight streaming requests a
+        # brief window to wind down so their spinner/daemon threads stop
+        # writing to stderr before the interpreter finalizes.
+        server.begin_shutdown()
         if tunnel is not None:
             tunnel.stop()
         server.server_close()

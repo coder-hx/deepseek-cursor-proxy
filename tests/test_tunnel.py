@@ -56,17 +56,20 @@ class TunnelTests(unittest.TestCase):
             "deepseek_cursor_proxy.tunnel.shutil.which", return_value="/x/ngrok"
         ):
             with patch("deepseek_cursor_proxy.tunnel.subprocess.Popen") as popen:
-                popen.return_value = MagicMock(poll=lambda: None)
+                popen.return_value = MagicMock(poll=lambda: None, stdout=None)
                 with patch.object(
-                    NgrokTunnel,
-                    "wait_for_public_url",
-                    return_value="https://example.ngrok-free.app",
+                    NgrokTunnel, "existing_public_url", return_value=None
                 ):
-                    tunnel = NgrokTunnel(
-                        "http://127.0.0.1:9000",
-                        ngrok_url="https://my.ngrok.dev",
-                    )
-                    tunnel.start()
+                    with patch.object(
+                        NgrokTunnel,
+                        "wait_for_public_url",
+                        return_value="https://example.ngrok-free.app",
+                    ):
+                        tunnel = NgrokTunnel(
+                            "http://127.0.0.1:9000",
+                            ngrok_url="https://my.ngrok.dev",
+                        )
+                        tunnel.start()
                 popen.assert_called_once()
                 argv, _kwargs = popen.call_args
                 self.assertEqual(
@@ -78,6 +81,32 @@ class TunnelTests(unittest.TestCase):
                         "--url=https://my.ngrok.dev",
                     ],
                 )
+
+    def test_ngrok_tunnel_reuses_existing_agent(self) -> None:
+        with patch.object(
+            NgrokTunnel,
+            "existing_public_url",
+            return_value="https://reused.ngrok-free.app",
+        ):
+            with patch("deepseek_cursor_proxy.tunnel.subprocess.Popen") as popen:
+                tunnel = NgrokTunnel("http://127.0.0.1:9000")
+                self.assertEqual(tunnel.start(), "https://reused.ngrok-free.app")
+                self.assertTrue(tunnel.reused_existing)
+                popen.assert_not_called()
+
+    def test_exit_error_message_includes_simultaneous_session_hint(self) -> None:
+        tunnel = NgrokTunnel("http://127.0.0.1:9000")
+        tunnel._output_lines.append("ERR_NGROK_108 limited to 1 simultaneous session")
+        message = tunnel._exit_error_message()
+        self.assertIn("ngrok exited before creating a tunnel", message)
+        self.assertIn("ERR_NGROK_108", message)
+        self.assertIn("only one session at a time", message)
+
+    def test_exit_error_message_without_output_is_actionable(self) -> None:
+        tunnel = NgrokTunnel("http://127.0.0.1:9000")
+        message = tunnel._exit_error_message()
+        self.assertIn("no output captured", message)
+        self.assertIn("add-authtoken", message)
 
 
 if __name__ == "__main__":
